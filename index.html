@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Imprimir Menú</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700&family=Source+Sans+3:wght@400;600&display=swap">
+<style>
+:root{
+  --bg:#f5f6f4; --panel:#ffffff; --fg:#1d2420; --muted:#5d6862; --line:#d9ddd9; --accent:#2f6b4f; --accent-fg:#ffffff;
+  --display:"Archivo",system-ui,sans-serif; --body:"Source Sans 3",system-ui,sans-serif;
+}
+@media (prefers-color-scheme: dark){:root{--bg:#141816;--panel:#1d2320;--fg:#e8ece9;--muted:#9aa59f;--line:#333b37;--accent:#6fbf96;--accent-fg:#0f1a14;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 var(--body)}
+.wrap{max-width:760px;margin:0 auto;padding:32px 16px;display:flex;flex-direction:column;gap:20px}
+h1{font:700 24px/1.2 var(--display);margin:0}
+.drop{background:var(--panel);border:2px dashed var(--line);border-radius:10px;padding:36px 16px;text-align:center;cursor:pointer;transition:border-color .15s}
+.drop:hover,.drop.over{border-color:var(--accent)}
+.drop strong{display:block;font:600 17px var(--display)}
+.drop span{color:var(--muted);font-size:14px}
+.bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.btn{font:700 16px var(--display);padding:12px 22px;border-radius:8px;border:1px solid var(--accent);cursor:pointer}
+.btn.primary{background:var(--accent);color:var(--accent-fg)}
+.btn.ghost{background:transparent;color:var(--accent)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.status{color:var(--muted);font-size:14px;margin-left:auto}
+.err{color:#c0392b}
+button:focus-visible,.drop:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.preview{display:flex;flex-direction:column;gap:16px;align-items:center}
+.preview canvas{max-width:100%;height:auto;box-shadow:0 2px 12px rgba(0,0,0,.18);background:#fff}
+#printArea{display:none}
+@media print{
+  body{background:#fff}
+  .wrap{display:none!important}
+  #printArea{display:block}
+  #printArea img{display:block;break-after:page}
+  #printArea img:last-child{break-after:auto}
+}
+</style>
+<style id="pageStyle"></style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Imprimir menú</h1>
+
+  <div class="drop" id="drop" tabindex="0" role="button">
+    <strong id="fileName">Sube o arrastra el PDF del menú</strong>
+    <span>Portadas juntas a 12.92 × 18.01 cm · el resto 6 por hoja</span>
+  </div>
+  <input type="file" id="file" accept=".pdf" hidden>
+
+  <div class="bar">
+    <button class="btn primary" id="print" disabled>Imprimir</button>
+    <button class="btn ghost" id="download" disabled>Descargar PDF</button>
+    <span class="status" id="status"></span>
+  </div>
+
+  <div class="preview" id="preview"></div>
+</div>
+<div id="printArea"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+// ===== Ajustes fijos del menú (cámbialos aquí si algún día cambia el diseño) =====
+const PORTADAS = 2;                       // primeras páginas que van juntas
+const PORTADA_CM = [12.92, 18.01];        // ancho × alto de cada portada
+const POR_HOJA = 6;                       // demás páginas por hoja (vertical)
+const COLUMNAS = 2;                       // 2 columnas × 3 filas
+const PAPEL = [612, 792];                 // Carta, en puntos
+const MARGEN = 14, ESPACIO = 16;          // ~0.5 cm y ~0.56 cm
+const LINEAS_CORTE = true;
+const CORTE_AFUERA = 5;                   // la línea de corte va ~1.8 mm por fuera del borde del diseño
+// ===============================================================================
+
+const { PDFDocument, rgb } = PDFLib;
+const CM = 72/2.54;
+const $ = id => document.getElementById(id);
+let pdfUrl = null, nombre = 'menu';
+
+const WORKER_URL = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+const workerReady = fetch(WORKER_URL).then(r => r.text()).then(t => {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(new Blob([t], { type:'text/javascript' }));
+}).catch(() => { pdfjsLib.GlobalWorkerOptions.workerSrc = WORKER_URL; });
+
+// --- Subir archivo ---
+['dragover','drop'].forEach(ev => window.addEventListener(ev, e => e.preventDefault()));
+$('drop').onclick = () => $('file').click();
+$('drop').onkeydown = e => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); $('file').click(); } };
+$('file').onchange = e => { if (e.target.files[0]) armar(e.target.files[0]); e.target.value = ''; };
+['dragover','dragenter'].forEach(ev => $('drop').addEventListener(ev, () => $('drop').classList.add('over')));
+['dragleave','drop'].forEach(ev => $('drop').addEventListener(ev, () => $('drop').classList.remove('over')));
+$('drop').addEventListener('drop', e => e.dataTransfer.files[0] && armar(e.dataTransfer.files[0]));
+
+function estado(msg, error){ $('status').textContent = msg; $('status').classList.toggle('err', !!error); }
+
+function marco(page, o){
+  const d = CORTE_AFUERA;
+  if (LINEAS_CORTE) page.drawRectangle({ x:o.x-d, y:o.y-d, width:o.width+2*d, height:o.height+2*d, borderColor:rgb(.6,.6,.6), borderWidth:.5, borderDashArray:[3,3] });
+}
+
+async function armar(file){
+  if (!file.name.toLowerCase().endsWith('.pdf')) return estado('Ese archivo no es PDF.', true);
+  nombre = file.name.replace(/\.pdf$/i, '');
+  $('fileName').textContent = file.name;
+  $('print').disabled = $('download').disabled = true;
+  estado('Preparando…');
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const fuente = await PDFDocument.load(bytes, { ignoreEncryption:true });
+    const total = fuente.getPageCount();
+    const out = await PDFDocument.create();
+    const pags = await out.embedPdf(bytes, Array.from({ length: total }, (_, i) => i));
+
+    // Hoja 1 (horizontal): portadas una al lado de la otra, a la medida exacta, centradas
+    const portadas = pags.slice(0, PORTADAS);
+    if (portadas.length) {
+      const [W, H] = [PAPEL[1], PAPEL[0]];
+      const w = PORTADA_CM[0]*CM, h = PORTADA_CM[1]*CM;
+      const n = portadas.length;
+      const x0 = (W - (n*w + (n-1)*ESPACIO)) / 2, y = (H - h) / 2;
+      const page = out.addPage([W, H]);
+      portadas.forEach((p, i) => {
+        const o = { x: x0 + i*(w+ESPACIO), y, width:w, height:h };
+        page.drawPage(p, o); marco(page, o);
+      });
+    }
+
+    // Demás hojas (verticales): 6 por hoja, lo más grande posible sin deformar
+    const resto = pags.slice(PORTADAS);
+    const [W, H] = PAPEL, filas = Math.ceil(POR_HOJA / COLUMNAS);
+    const cw = (W - 2*MARGEN - (COLUMNAS-1)*ESPACIO) / COLUMNAS;
+    const ch = (H - 2*MARGEN - (filas-1)*ESPACIO) / filas;
+    for (let i = 0; i < resto.length; i += POR_HOJA) {
+      const page = out.addPage([W, H]);
+      resto.slice(i, i + POR_HOJA).forEach((p, k) => {
+        const s = Math.min(cw/p.width, ch/p.height), w = p.width*s, h = p.height*s;
+        const col = k % COLUMNAS, row = Math.floor(k / COLUMNAS);
+        const o = { x: MARGEN + col*(cw+ESPACIO) + (cw-w)/2, y: H - MARGEN - (row+1)*ch - row*ESPACIO + (ch-h)/2, width:w, height:h };
+        page.drawPage(p, o); marco(page, o);
+      });
+    }
+
+    const outBytes = await out.save();
+    if (pdfUrl) URL.revokeObjectURL(pdfUrl);
+    pdfUrl = URL.createObjectURL(new Blob([outBytes], { type:'application/pdf' }));
+    await dibujar(outBytes);
+    estado(`Listo · ${out.getPageCount()} hojas`);
+    $('print').disabled = $('download').disabled = false;
+  } catch (e) {
+    console.error(e); estado('No se pudo abrir el PDF. Prueba de nuevo.', true);
+  }
+}
+
+// Vista previa y versión en alta calidad para imprimir
+async function dibujar(bytes){
+  await workerReady;
+  const doc = await pdfjsLib.getDocument({ data: bytes.slice() }).promise;
+  $('preview').innerHTML = ''; $('printArea').innerHTML = '';
+  let css = ''; const hechos = {};
+  for (let n = 1; n <= doc.numPages; n++) {
+    const pg = await doc.getPage(n);
+    const render = async escala => {
+      const vp = pg.getViewport({ scale: escala });
+      const c = document.createElement('canvas');
+      c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+      const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+      await pg.render({ canvasContext: ctx, viewport: vp }).promise;
+      return c;
+    };
+    $('preview').appendChild(await render(1.2));
+    const base = pg.getViewport({ scale: 1 });
+    const horizontal = base.width > base.height, clase = horizontal ? 'hor' : 'ver';
+    const wIn = base.width/72, hIn = base.height/72;
+    if (!hechos[clase]) { hechos[clase] = 1; css += `@page ${clase}{size:${wIn}in ${hIn}in;margin:0}#printArea .${clase}{page:${clase};width:${wIn}in;height:${hIn}in}`; }
+    const img = new Image(); img.className = clase; img.alt = '';
+    img.src = (await render(300/72)).toDataURL('image/png');
+    $('printArea').appendChild(img);
+  }
+  $('pageStyle').textContent = `@media print{${css}}`;
+}
+
+$('print').onclick = () => window.print();
+$('download').onclick = () => {
+  const a = document.createElement('a');
+  a.href = pdfUrl; a.download = nombre + ' - imprimir.pdf';
+  document.body.appendChild(a); a.click(); a.remove();
+};
+</script>
+</body>
+</html>
