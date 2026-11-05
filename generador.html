@@ -72,9 +72,16 @@ button:disabled{background:var(--line);border-color:var(--line);color:var(--mute
 .pv-head h3{margin:0;font-family:var(--brand);font-weight:600;font-size:26px;line-height:1.1}
 .pv-head span{color:var(--muted);font-size:13px}
 .pages{background:var(--tray);border:1px solid var(--line);border-radius:var(--r);padding:14px;display:flex;flex-wrap:wrap;gap:10px;align-items:flex-start;max-height:78vh;overflow:auto}
-.pages canvas{background:#fff;box-shadow:0 1px 2px rgba(47,47,14,.14),0 0 0 1px var(--line);display:block}
-.pages canvas.cover{width:calc(50% - 5px)}
-.pages canvas.card{width:calc(50% - 5px)}
+.pages canvas{background:#fff;box-shadow:0 1px 2px rgba(47,47,14,.14),0 0 0 1px var(--line);display:block;width:100%}
+.pv-tools{display:flex;justify-content:space-between;align-items:center;gap:4px 12px;flex-wrap:wrap}
+.pg{position:relative;width:calc(50% - 5px);cursor:pointer;display:block}
+.pg input{position:absolute;opacity:0;pointer-events:none}
+.pg .mark{position:absolute;top:6px;left:6px;width:24px;height:24px;border-radius:6px;display:grid;place-items:center;background:var(--deep);color:var(--deep-fg);font:700 14px var(--body);box-shadow:0 0 0 2px #fff}
+.pg .mark::after{content:"✓"}
+.pg:has(input:not(:checked)) canvas{opacity:.3}
+.pg:has(input:not(:checked)) .mark{background:#fff;color:var(--muted);box-shadow:0 0 0 1px var(--line)}
+.pg:has(input:not(:checked)) .mark::after{content:""}
+.pg:has(input:focus-visible){outline:3px solid var(--accent);outline-offset:2px}
 .status{font-size:13px;color:var(--muted);min-height:1.2em;margin:0}
 .status.err{color:#b3261e}
 @media (prefers-reduced-motion:no-preference){button{transition:transform .1s}button:active{transform:translateY(1px)}}
@@ -118,16 +125,19 @@ button:disabled{background:var(--line);border-color:var(--line);color:var(--mute
 
       <section class="step">
         <h2><b>4</b>Descargar</h2>
+        <div class="row"><label class="f" for="size" style="flex-direction:row">Tamaño
+          <select id="size"><option value="menu" selected>Tamaño menú (como siempre)</option><option value="carta">Hoja carta completa (en grande)</option></select></label></div>
         <div class="row"><label class="f" for="dpi" style="flex-direction:row">Calidad
           <select id="dpi"><option value="300">Alta · 300 dpi</option><option value="600" selected>Máxima · 600 dpi</option></select></label></div>
         <div class="row"><button class="primary" id="go" type="button">Generar PDF</button></div>
         <p class="status" id="status" role="status"></p>
-        <p class="hint">Si elige varios condominios, se descarga un .zip con un PDF por condominio. Cada PDF trae la misma estructura de siempre: 2 portadas (12.7 × 17.7 cm) y las tarjetas de 9 × 5 cm.</p>
+        <p class="hint"><b>Tamaño menú:</b> 2 portadas (12.7 × 17.7 cm) y tarjetas de 9 × 5 cm, como siempre. <b>Hoja carta completa:</b> cada página elegida sale en grande en su propia hoja carta (las tarjetas en horizontal), por ejemplo para pegar en la hielera. Solo se incluyen las páginas marcadas en la vista previa. Si elige varios condominios, se descarga un .zip con un PDF por condominio.</p>
       </section>
     </div>
 
     <aside class="preview">
       <div class="pv-head"><h3 id="pvName">Vista previa</h3><span id="pvCount"></span></div>
+      <div class="pv-tools"><span class="hint">Toque una página para incluirla o quitarla del PDF.</span><span class="row"><button class="link" id="pgAll" type="button">Marcar todas</button><button class="link" id="pgNone" type="button">Quitar todas</button></span></div>
       <div class="pages" id="pages"></div>
     </aside>
   </div>
@@ -716,6 +726,10 @@ function bindDrinks(){
   box.addEventListener('change',e=>{ if(e.target.type==='checkbox'){drinks[+e.target.dataset.i].join=e.target.checked;renderDrinks();} });
   box.addEventListener('click',e=>{ const b=e.target.closest('[data-del]'); if(b){drinks.splice(+b.dataset.del,1);if(drinks[0])drinks[0].join=false;renderDrinks();} });
 }
+/* ---------- páginas elegidas ---------- */
+const skip=new Set();
+const pageKey=p=>p.t==='cover'?'cover-'+p.lang:'card-'+p.lines.join('|');
+const chosenPages=pages=>pages.filter(p=>!skip.has(pageKey(p)));
 function pagesFor(menu){
   // mismo orden del PDF actual: portada ES, portada EN, bebidas, tarjetas ES, tarjetas EN
   const p=[{t:'cover',lang:'es',items:menu.es},{t:'cover',lang:'en',items:menu.en.length?menu.en:menu.es}];
@@ -739,14 +753,19 @@ async function renderPage(page,condo,scale){
 /* ---------- PDF ---------- */
 async function buildPdf(condo,menu){
   const {jsPDF}=window.jspdf;
-  const pages=pagesFor(menu), S=(+$('dpi').value||600)/72;
+  const pages=chosenPages(pagesFor(menu)), S=(+$('dpi').value||600)/72, carta=$('size').value==='carta';
   let doc=null;
   for(const p of pages){
     const dim=p.t==='cover'?COVER:CARD, orient=dim.w>dim.h?'l':'p';
-    if(!doc) doc=new jsPDF({unit:'pt',format:[dim.w,dim.h],orientation:orient,compress:true});
-    else doc.addPage([dim.w,dim.h],orient);
-    const cv=await renderPage(p,condo,S);
-    doc.addImage(cv.toDataURL('image/jpeg',0.95),'JPEG',0,0,dim.w,dim.h,undefined,'FAST');
+    // Hoja carta: 11 × 8.5 in en horizontal para tarjetas, vertical para portadas, con 0.4 in de margen
+    const pw=carta?(orient==='l'?792:612):dim.w, ph=carta?(orient==='l'?612:792):dim.h;
+    const k=carta?Math.min((pw-57.6)/dim.w,(ph-57.6)/dim.h):1;
+    if(!doc) doc=new jsPDF({unit:'pt',format:[pw,ph],orientation:orient,compress:true});
+    else doc.addPage([pw,ph],orient);
+    // límite de píxeles para que funcione también en celulares
+    const px=Math.min(S*k,Math.sqrt(15e6/(dim.w*dim.h)));
+    const cv=await renderPage(p,condo,px);
+    doc.addImage(cv.toDataURL('image/jpeg',0.95),'JPEG',(pw-dim.w*k)/2,(ph-dim.h*k)/2,dim.w*k,dim.h*k,undefined,'FAST');
   }
   doc.setProperties({title:'Menú '+condo.name,author:'Hacienda Pinilla – COA'});
   return doc;
@@ -783,12 +802,24 @@ async function preview(){
   const sel=selected(), condo=sel[0]||CONDOS.find(c=>c.id==='bosques');
   const menu=readMenu(), pages=pagesFor(menu);
   $('pvName').textContent=condo.name;
-  $('pvCount').textContent=`${pages.length} páginas`+(sel.length>1?` · ${sel.length} condominios`:'');
   const box=$('pages'); const frag=document.createDocumentFragment();
-  for(const p of pages) frag.appendChild(await renderPage(p,condo,2));
+  for(const [i,p] of pages.entries()){
+    const k=pageKey(p), lab=document.createElement('label');
+    lab.className='pg'; lab.htmlFor='pg_'+i;
+    const cb=document.createElement('input'); cb.type='checkbox'; cb.id='pg_'+i; cb.checked=!skip.has(k);
+    cb.setAttribute('aria-label','Incluir '+(p.t==='cover'?'portada '+(p.lang==='es'?'en español':'en inglés'):'tarjeta '+p.lines.join(', ')));
+    cb.onchange=()=>{cb.checked?skip.delete(k):skip.add(k);countPages();};
+    const mk=document.createElement('span'); mk.className='mark';
+    lab.append(cb,await renderPage(p,condo,2),mk); frag.appendChild(lab);
+  }
   box.replaceChildren(frag);
+  countPages();
   const en=menu.en.length, es=menu.es.length;
   setStatus(en && en!==es ? `Hay ${es} bocadillos en español y ${en} en inglés. Revise que coincidan línea por línea.` : '', en && en!==es);
+}
+function countPages(){
+  const sel=selected(), pages=pagesFor(readMenu()), n=chosenPages(pages).length;
+  $('pvCount').textContent=(n===pages.length?`${n} páginas`:`${n} de ${pages.length} páginas`)+(sel.length>1?` · ${sel.length} condominios`:'');
 }
 function setStatus(t,err){const s=$('status');s.textContent=t;s.classList.toggle('err',!!err);}
 
@@ -796,23 +827,25 @@ async function generate(){
   const sel=selected(), menu=readMenu();
   if(!sel.length) return setStatus('Elija al menos un condominio.',true);
   if(!menu.es.length) return setStatus('Escriba al menos un bocadillo en español.',true);
+  if(!chosenPages(pagesFor(menu)).length) return setStatus('Marque al menos una página en la vista previa.',true);
+  const suf=$('size').value==='carta'?' (hoja carta)':'';
   $('go').disabled=true;
   try{
     if(sel.length===1){
       setStatus('Generando PDF…');
       const doc=await buildPdf(sel[0],menu);
-      await saveBlob(doc.output('blob'),`Menú ${sel[0].name}.pdf`);
-      setStatus(`Listo: Menú ${sel[0].name}.pdf`);
+      await saveBlob(doc.output('blob'),`Menú ${sel[0].name}${suf}.pdf`);
+      setStatus(`Listo: Menú ${sel[0].name}${suf}.pdf`);
     }else{
       const zip=new JSZip();
       for(const [i,c] of sel.entries()){
         setStatus(`Generando ${i+1} de ${sel.length}: ${c.name}…`);
         const doc=await buildPdf(c,menu);
-        zip.file(`Menú ${c.name}.pdf`,doc.output('arraybuffer'));
+        zip.file(`Menú ${c.name}${suf}.pdf`,doc.output('arraybuffer'));
       }
       const blob=await zip.generateAsync({type:'blob'});
-      await saveBlob(blob,'Menús asambleas.zip');
-      setStatus(`Listo: ${sel.length} PDF en "Menús asambleas.zip"`);
+      await saveBlob(blob,`Menús asambleas${suf}.zip`);
+      setStatus(`Listo: ${sel.length} PDF en "Menús asambleas${suf}.zip"`);
     }
   }catch(e){console.error(e);setStatus(e&&e.code==='declined'?'Descarga cancelada.':'No se pudo generar el PDF: '+(e.message||e.code),true);}
   finally{$('go').disabled=false;}
@@ -831,6 +864,8 @@ function init(){
   $('all').onclick=()=>{CONDOS.forEach(c=>$('c_'+c.id).checked=true);schedule();};
   $('none').onclick=()=>{CONDOS.forEach(c=>$('c_'+c.id).checked=false);schedule();};
   $('go').onclick=generate;
+  $('pgAll').onclick=()=>{skip.clear();$('pages').querySelectorAll('.pg input').forEach(c=>c.checked=true);countPages();};
+  $('pgNone').onclick=()=>{pagesFor(readMenu()).forEach(p=>skip.add(pageKey(p)));$('pages').querySelectorAll('.pg input').forEach(c=>c.checked=false);countPages();};
   $('loadBtn').onclick=()=>$('file').click();
   $('file').onchange=async e=>{
     const f=e.target.files[0]; if(!f) return;
